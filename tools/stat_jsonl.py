@@ -18,12 +18,22 @@ import os
 import sys
 import json
 import argparse
+import time
+import logging
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import glob
 from collections import Counter
 import statistics
 import re
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 
 def find_jsonl_files(directory: str) -> List[str]:
@@ -40,12 +50,16 @@ def find_jsonl_files(directory: str) -> List[str]:
     directory_path = Path(directory)
     
     if not directory_path.exists():
+        logger.error(f"Directory '{directory}' does not exist.")
         print(f"Error: Directory '{directory}' does not exist.")
         sys.exit(1)
     
     if not directory_path.is_dir():
+        logger.error(f"'{directory}' is not a directory.")
         print(f"Error: '{directory}' is not a directory.")
         sys.exit(1)
+    
+    logger.info(f"Scanning directory: {directory}")
     
     # Recursively find all .jsonl files
     for jsonl_file in directory_path.rglob("*.jsonl"):
@@ -57,6 +71,7 @@ def find_jsonl_files(directory: str) -> List[str]:
             if str(jsonl_file) not in jsonl_files:
                 jsonl_files.append(str(jsonl_file))
     
+    logger.info(f"Found {len(jsonl_files)} jsonl file(s)")
     return sorted(jsonl_files)
 
 
@@ -228,6 +243,10 @@ def process_jsonl_file(file_path: str, sp_model=None) -> Dict:
     }
     
     try:
+        # Get file size for progress reporting
+        file_size = os.path.getsize(file_path)
+        logger.debug(f"Processing file: {file_path} (size: {file_size:,} bytes)")
+        
         with open(file_path, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
@@ -236,6 +255,10 @@ def process_jsonl_file(file_path: str, sp_model=None) -> Dict:
                     continue
                 
                 stats['total_lines'] += 1
+                
+                # Log progress every 10000 lines
+                if line_num % 10000 == 0:
+                    logger.info(f"  Processing {file_path}: {line_num:,} lines processed...")
                 
                 try:
                     data = json.loads(line)
@@ -328,10 +351,14 @@ def process_jsonl_file(file_path: str, sp_model=None) -> Dict:
                     stats['error_lines'] += 1
                 except Exception as e:
                     stats['error_lines'] += 1
+        
+        logger.info(f"  Completed: {file_path} ({stats['total_lines']:,} lines, {stats['valid_lines']:,} valid)")
                     
     except FileNotFoundError:
+        logger.error(f"File not found: {file_path}")
         print(f"Error: File '{file_path}' not found.")
     except Exception as e:
+        logger.error(f"Error reading '{file_path}': {e}")
         print(f"Error reading '{file_path}': {e}")
     
     return stats
@@ -347,7 +374,11 @@ def aggregate_statistics(all_stats: List[Dict]) -> Dict:
     Returns:
         Aggregated statistics dictionary
     """
+    logger.info("Starting aggregation of statistics...")
+    
     total_files = len(all_stats)
+    logger.debug(f"Aggregating {total_files} files")
+    
     total_lines = sum(s['total_lines'] for s in all_stats)
     valid_lines = sum(s['valid_lines'] for s in all_stats)
     empty_lines = sum(s['empty_lines'] for s in all_stats)
@@ -359,6 +390,8 @@ def aggregate_statistics(all_stats: List[Dict]) -> Dict:
     total_words = sum(s['total_words'] for s in all_stats)
     total_sentences = sum(s['total_sentences'] for s in all_stats)
     total_utf8_bytes = sum(s['total_utf8_bytes'] for s in all_stats)
+    
+    logger.debug(f"Total lines: {total_lines:,}, Valid: {valid_lines:,}, Errors: {error_lines}")
     
     # Character type totals
     total_alpha = sum(s['total_alpha'] for s in all_stats)
@@ -423,6 +456,9 @@ def aggregate_statistics(all_stats: List[Dict]) -> Dict:
         'chinese_pct': (total_chinese / total_chars_all * 100) if total_chars_all > 0 else 0,
         'other_pct': (total_other / total_chars_all * 100) if total_chars_all > 0 else 0,
     }
+    
+    logger.info("Aggregation completed")
+    logger.debug(f"  Unique texts: {len(text_counter)}, Duplicates: {duplicate_lines}")
     
     return {
         'total_files': total_files,
@@ -737,6 +773,8 @@ def save_results(aggregated: Dict, all_stats: List[Dict], output_file: str):
 
 
 def main():
+    start_time = time.time()
+    
     parser = argparse.ArgumentParser(
         description='Recursively find jsonl files and extract text field statistics.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -770,31 +808,60 @@ def main():
         help='Show detailed statistics for each file'
     )
     
+    parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+        help='Enable verbose logging (debug level)'
+    )
+    
     args = parser.parse_args()
     
+    # Set logging level
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.debug("Verbose logging enabled")
+    
+    logger.info("=" * 60)
+    logger.info("JSONL Text Field Statistics Tool")
+    logger.info("=" * 60)
+    
     # Find all jsonl files
-    print(f"Searching for jsonl files in: {args.directory}")
+    logger.info(f"Searching for jsonl files in: {args.directory}")
+    print(f"\nSearching for jsonl files in: {args.directory}")
     jsonl_files = find_jsonl_files(args.directory)
     
     if not jsonl_files:
         print("No jsonl files found.")
+        logger.warning("No jsonl files found")
         return
     
     print(f"Found {len(jsonl_files)} jsonl file(s)")
+    logger.info(f"Found {len(jsonl_files)} jsonl file(s)")
     
     # Load SentencePiece model if provided
     sp_model = load_sentencepiece(args.model)
+    if sp_model:
+        logger.info("SentencePiece model loaded successfully")
     
     # Process each file
     print("\nProcessing files...")
+    logger.info("Starting file processing...")
     all_stats = []
     
     for i, jsonl_file in enumerate(jsonl_files, 1):
+        file_start_time = time.time()
         print(f"  [{i}/{len(jsonl_files)}] Processing: {jsonl_file}")
+        logger.info(f"[{i}/{len(jsonl_files)}] Processing: {jsonl_file}")
+        
         stats = process_jsonl_file(jsonl_file, sp_model)
         all_stats.append(stats)
+        
+        file_elapsed = time.time() - file_start_time
+        logger.info(f"  Completed: {jsonl_file} in {file_elapsed:.2f}s")
     
     # Aggregate statistics
+    logger.info("Aggregating statistics...")
+    print("\nAggregating statistics...")
     aggregated = aggregate_statistics(all_stats)
     
     # Print results
@@ -803,6 +870,16 @@ def main():
     # Save results if output file specified
     if args.output:
         save_results(aggregated, all_stats, args.output)
+    
+    # Summary
+    total_elapsed = time.time() - start_time
+    logger.info("=" * 60)
+    logger.info(f"Statistics completed in {total_elapsed:.2f} seconds")
+    logger.info(f"  Total files: {aggregated['total_files']}")
+    logger.info(f"  Total lines: {aggregated['total_lines']:,}")
+    logger.info(f"  Valid lines: {aggregated['valid_lines']:,}")
+    logger.info(f"  Error lines: {aggregated['error_lines']}")
+    logger.info("=" * 60)
 
 
 if __name__ == '__main__':
